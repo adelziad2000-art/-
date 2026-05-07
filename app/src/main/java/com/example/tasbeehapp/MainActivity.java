@@ -36,8 +36,14 @@ import java.util.Locale;
 public class MainActivity extends Activity {
 
     private static final String PREFS_NAME = "tasbeeh_prefs";
+
     private static final String KEY_SELECTED_DHIKR = "selected_dhikr";
     private static final String KEY_ADHKAR_LIST = "adhkar_list";
+
+    // مفاتيح النسخة القديمة عشان ننقل منها البيانات لو كانت موجودة
+    private static final String KEY_LEGACY_COUNT = "count";
+    private static final String KEY_LEGACY_DHIKR = "dhikr";
+    private static final String KEY_MIGRATION_DONE = "legacy_migration_done";
 
     private int count;
     private String selectedDhikr;
@@ -70,6 +76,9 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
 
         loadAdhkarList();
+
+        // تنقل العدد القديم للجدول اليومي مرة واحدة فقط
+        migrateOldCountIfNeeded();
 
         selectedDhikr = prefs.getString(KEY_SELECTED_DHIKR, adhkarList.get(0));
 
@@ -235,12 +244,7 @@ public class MainActivity extends Activity {
             vibrate();
         });
 
-        resetButton.setOnClickListener(v -> {
-            count = 0;
-            saveTodayCount(selectedDhikr, count);
-            updateUi();
-            refreshDailyTable();
-        });
+        resetButton.setOnClickListener(v -> showResetConfirmationDialog());
     }
 
     private void showAddDhikrDialog() {
@@ -263,14 +267,14 @@ public class MainActivity extends Activity {
             Button positiveButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
 
             positiveButton.setOnClickListener(v -> {
-                String newDhikr = input.getText().toString().trim();
+                String newDhikr = normalizeDhikrText(input.getText().toString());
 
                 if (newDhikr.isEmpty()) {
                     Toast.makeText(this, "من فضلك اكتب اسم الذكر", Toast.LENGTH_SHORT).show();
                     return;
                 }
 
-                if (adhkarList.contains(newDhikr)) {
+                if (containsDhikrNormalized(newDhikr)) {
                     Toast.makeText(this, "هذا الذكر موجود بالفعل", Toast.LENGTH_SHORT).show();
                     return;
                 }
@@ -295,6 +299,21 @@ public class MainActivity extends Activity {
         });
 
         dialog.show();
+    }
+
+    private void showResetConfirmationDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("تأكيد التصفير")
+                .setMessage("هل تريد تصفير عدد هذا الذكر لليوم؟")
+                .setPositiveButton("نعم، صفّر", (dialog, which) -> {
+                    count = 0;
+                    saveTodayCount(selectedDhikr, count);
+                    updateUi();
+                    refreshDailyTable();
+                    Toast.makeText(this, "تم تصفير الذكر الحالي", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("إلغاء", null)
+                .show();
     }
 
     private void updateUi() {
@@ -371,9 +390,9 @@ public class MainActivity extends Activity {
                 JSONArray array = new JSONArray(savedJson);
 
                 for (int i = 0; i < array.length(); i++) {
-                    String value = array.getString(i).trim();
+                    String value = normalizeDhikrText(array.getString(i));
 
-                    if (!value.isEmpty() && !adhkarList.contains(value)) {
+                    if (!value.isEmpty() && !containsDhikrNormalized(value)) {
                         adhkarList.add(value);
                     }
                 }
@@ -382,7 +401,7 @@ public class MainActivity extends Activity {
 
         if (adhkarList.isEmpty()) {
             for (String dhikr : defaultAdhkar) {
-                adhkarList.add(dhikr);
+                adhkarList.add(normalizeDhikrText(dhikr));
             }
 
             saveAdhkarList();
@@ -393,12 +412,42 @@ public class MainActivity extends Activity {
         JSONArray array = new JSONArray();
 
         for (String dhikr : adhkarList) {
-            array.put(dhikr);
+            array.put(normalizeDhikrText(dhikr));
         }
 
         prefs.edit()
                 .putString(KEY_ADHKAR_LIST, array.toString())
                 .apply();
+    }
+
+    private void migrateOldCountIfNeeded() {
+        boolean migrationDone = prefs.getBoolean(KEY_MIGRATION_DONE, false);
+
+        if (migrationDone) {
+            return;
+        }
+
+        int oldCount = prefs.getInt(KEY_LEGACY_COUNT, 0);
+        String oldDhikr = normalizeDhikrText(prefs.getString(KEY_LEGACY_DHIKR, ""));
+
+        if (oldCount > 0 && !oldDhikr.isEmpty()) {
+            if (!containsDhikrNormalized(oldDhikr)) {
+                adhkarList.add(oldDhikr);
+                saveAdhkarList();
+            }
+
+            int todayCurrentCount = getTodayCount(oldDhikr);
+            saveTodayCount(oldDhikr, todayCurrentCount + oldCount);
+
+            prefs.edit()
+                    .putString(KEY_SELECTED_DHIKR, oldDhikr)
+                    .putBoolean(KEY_MIGRATION_DONE, true)
+                    .apply();
+        } else {
+            prefs.edit()
+                    .putBoolean(KEY_MIGRATION_DONE, true)
+                    .apply();
+        }
     }
 
     private void saveSelectedDhikr() {
@@ -418,8 +467,10 @@ public class MainActivity extends Activity {
     }
 
     private String getTodayCountKey(String dhikr) {
+        String cleanDhikr = normalizeDhikrText(dhikr);
+
         String encodedDhikr = Base64.encodeToString(
-                dhikr.getBytes(StandardCharsets.UTF_8),
+                cleanDhikr.getBytes(StandardCharsets.UTF_8),
                 Base64.NO_WRAP | Base64.URL_SAFE | Base64.NO_PADDING
         );
 
@@ -428,6 +479,26 @@ public class MainActivity extends Activity {
 
     private String getToday() {
         return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+    }
+
+    private String normalizeDhikrText(String text) {
+        if (text == null) {
+            return "";
+        }
+
+        return text.trim().replaceAll("\\s+", " ");
+    }
+
+    private boolean containsDhikrNormalized(String dhikr) {
+        String cleanDhikr = normalizeDhikrText(dhikr);
+
+        for (String existingDhikr : adhkarList) {
+            if (normalizeDhikrText(existingDhikr).equals(cleanDhikr)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void vibrate() {
